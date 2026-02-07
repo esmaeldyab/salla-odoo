@@ -1,0 +1,35 @@
+# Core
+Flask==3.0.0
+python-dotenv==1.0.0
+gunicorn==21.2.0
+
+# Database
+Flask-SQLAlchemy==3.1.1
+psycopg2-binary==2.9.9
+SQLAlchemy==2.0.23
+
+# Authentication
+Flask-Login==0.6.3
+Werkzeug==3.0.1
+
+# Admin Panel
+Flask-Admin==1.6.1
+WTForms==3.1.1
+
+# Task Queue
+celery==5.3.4
+kombu==5.3.4
+
+# HTTP Client
+requests==2.31.0
+urllib3==2.1.0
+
+# Utilities
+click==8.1.7
+
+# Production WSGI
+gevent==23.9.1
+greenlet==3.0.1
+
+# email
+Flask-Mail==0.9.1
