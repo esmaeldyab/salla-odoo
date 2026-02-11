@@ -1,5 +1,5 @@
 """
-Salla → Odoo Webhook Router
+Salla Odoo Webhook Router
 A Flask application to receive webhooks from Salla and forward them to Odoo instances.
 Features:
 - Async processing via Celery
@@ -129,10 +129,10 @@ class MerchantView(SecureModelView):
     """Admin view for Merchant model."""
     
     column_list = [
-        "merchant_id", "name", "odoo_url", "active",
+        "merchant_id", "name", "email", "odoo_url", "active",
         "webhook_count", "last_webhook_at", "failure_count"
     ]
-    column_searchable_list = ["merchant_id", "name", "odoo_url"]
+    column_searchable_list = ["merchant_id", "name", "email", "odoo_url"]
     column_filters = ["active", "created_at", "last_webhook_at"]
     column_editable_list = ["active"]
     column_sortable_list = [
@@ -165,6 +165,33 @@ class MerchantView(SecureModelView):
     can_export = True
     can_view_details = True
     page_size = 25
+    
+    def on_model_change(self, form, model, is_created):
+        """Send welcome email when a new merchant is created."""
+        if is_created:
+            from email_utils import send_welcome_email
+            from config import Config
+            
+            # Send welcome email
+            try:
+                email_sent = send_welcome_email(
+                    merchant_name=model.name or model.merchant_id,
+                    merchant_email=model.email,
+                    merchant_id=model.merchant_id,
+                    smtp_host=getattr(Config, 'SMTP_HOST', 'localhost'),
+                    smtp_port=getattr(Config, 'SMTP_PORT', 587),
+                    smtp_user=getattr(Config, 'SMTP_USER', ''),
+                    smtp_password=getattr(Config, 'SMTP_PASSWORD', ''),
+                    from_email=getattr(Config, 'SMTP_FROM_EMAIL', 'noreply@fsolutions.sa'),
+                    from_name=getattr(Config, 'SMTP_FROM_NAME', 'FSolutions - Salla Integration')
+                )
+                
+                if email_sent:
+                    flash(f'Welcome email sent to {model.email}', 'success')
+                else:
+                    flash(f'Merchant created but welcome email could not be sent to {model.email}', 'warning')
+            except Exception as e:
+                flash(f'Merchant created but email sending failed: {str(e)}', 'warning')
 
 
 class WebhookLogView(SecureModelView):
@@ -707,25 +734,26 @@ def register_cli_commands(app: Flask) -> None:
         os.makedirs(Config.LOG_DIR, exist_ok=True)
         
         db.create_all()
-        print("✓ Database tables created")
+        print("Database tables created")
         
         # Create default admin if not exists
         if not User.query.filter_by(username="admin").first():
             admin = User(username="admin")
             admin.set_password(Config.ADMIN_PASSWORD)
             db.session.add(admin)
-            print("✓ Default admin user created")
+            print("Default admin user created")
         
         # Add sample merchant if empty
         if Merchant.query.count() == 0:
             sample = Merchant(
                 merchant_id="sample_merchant_001",
                 name="Sample Store",
+                email="merchant@example.com",
                 odoo_url="https://your-odoo.com/salla/webhook",
                 active=False,  # Disabled by default
             )
             db.session.add(sample)
-            print("✓ Sample merchant created (disabled)")
+            print("Sample merchant created (disabled)")
         
         # Add default blocked events
         default_blocked = [
@@ -737,7 +765,7 @@ def register_cli_commands(app: Flask) -> None:
                 db.session.add(blocked)
         
         db.session.commit()
-        print("✓ Database initialization complete")
+        print("Database initialization complete")
     
     @app.cli.command("create-user")
     @click.argument("username")
@@ -745,14 +773,14 @@ def register_cli_commands(app: Flask) -> None:
     def create_user(username: str, password: str):
         """Create a new admin user."""
         if User.query.filter_by(username=username).first():
-            print(f"✗ User '{username}' already exists")
+            print(f"User '{username}' already exists")
             return
         
         user = User(username=username)
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
-        print(f"✓ User '{username}' created")
+        print(f"User '{username}' created")
     
     @app.cli.command("cleanup-logs")
     @click.option("--days", default=30, help="Delete logs older than N days")
@@ -766,7 +794,7 @@ def register_cli_commands(app: Flask) -> None:
         ).delete(synchronize_session=False)
         
         db.session.commit()
-        print(f"✓ Deleted {deleted} logs older than {days} days")
+        print(f"Deleted {deleted} logs older than {days} days")
 
 
 # ====================== APPLICATION INSTANCE ======================
@@ -776,7 +804,7 @@ app = create_app()
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 Salla → Odoo Webhook Router")
+    print("Salla Odoo Webhook Router")
     print("=" * 60)
     print("\nCommands:")
     print("  flask init-db          Initialize database")

@@ -14,33 +14,14 @@ from typing import Optional
 
 load_dotenv()
 
-
-class ConfigError(Exception):
-    """Raised when configuration is invalid."""
-    pass
-
-
-def get_required_env(key: str) -> str:
-    """Get a required environment variable or raise an error."""
-    value = os.getenv(key)
-    if not value:
-        raise ConfigError(f"Required environment variable '{key}' is not set.")
-    return value
-
-
-def get_optional_env(key: str, default: str = "") -> str:
-    """Get an optional environment variable with a default."""
-    return os.getenv(key, default)
-
-
 class Config:
     """Base configuration."""
     
     # Flask
-    SECRET_KEY = get_required_env("SECRET_KEY")
+    SECRET_KEY = os.getenv("SECRET_KEY")
     
     # Database
-    SQLALCHEMY_DATABASE_URI = get_required_env("SQLALCHEMY_DATABASE_URI")
+    SQLALCHEMY_DATABASE_URI = os.getenv("SQLALCHEMY_DATABASE_URI")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {
         "pool_size": 10,
@@ -53,24 +34,32 @@ class Config:
     FLASK_ADMIN_SWATCH = "cerulean"
     
     # Salla
-    SALLA_SECRET = get_required_env("SALLA_SECRET")
+    SALLA_SECRET = os.getenv("SALLA_SECRET")
     
     # Blocked events (comma-separated in env)
     BLOCKED_EVENTS = [
-        e.strip() for e in get_optional_env("BLOCKED_EVENTS", "").split(",") if e.strip()
+        e.strip() for e in os.getenv("BLOCKED_EVENTS", "").split(",") if e.strip()
     ]
     
     # Admin
-    ADMIN_PASSWORD = get_optional_env("ADMIN_PASSWORD", "P@123")
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "P@123")
     
     # Webhook forwarding
-    WEBHOOK_TIMEOUT = int(get_optional_env("WEBHOOK_TIMEOUT", "30"))
-    WEBHOOK_MAX_RETRIES = int(get_optional_env("WEBHOOK_MAX_RETRIES", "5"))
-    WEBHOOK_RETRY_BACKOFF = int(get_optional_env("WEBHOOK_RETRY_BACKOFF", "60"))
+    WEBHOOK_TIMEOUT = int(os.getenv("WEBHOOK_TIMEOUT", "30"))
+    WEBHOOK_MAX_RETRIES = int(os.getenv("WEBHOOK_MAX_RETRIES", "5"))
+    WEBHOOK_RETRY_BACKOFF = int(os.getenv("WEBHOOK_RETRY_BACKOFF", "60"))
     
     # Logging
-    LOG_LEVEL = get_optional_env("LOG_LEVEL", "INFO")
-    LOG_DIR = get_optional_env("LOG_DIR", "logs")
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_DIR = os.getenv("LOG_DIR", "logs")
+    
+    # Email/SMTP settings
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "noreply@fsolutions.sa")
+    SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "FSolutions - Salla Integration")
 
 
 class CeleryConfig:
@@ -128,7 +117,7 @@ class ProductionConfig(Config):
 
 def get_config() -> Config:
     """Get configuration based on environment."""
-    env = get_optional_env("FLASK_ENV", "production")
+    env = os.getenv("FLASK_ENV", "production")
     configs = {
         "development": DevelopmentConfig,
         "production": ProductionConfig,
