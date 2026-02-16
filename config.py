@@ -60,7 +60,10 @@ class Config:
     SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
     SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "noreply@fsolutions.sa")
     SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "FSolutions - Salla Integration")
-
+    
+    # Support team notification email settings
+    SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@fsolutions.sa")
+    SEND_SUPPORT_NOTIFICATIONS = os.getenv("SEND_SUPPORT_NOTIFICATIONS", "true").lower() == "true"
 
 class CeleryConfig:
     """Celery-specific configuration."""

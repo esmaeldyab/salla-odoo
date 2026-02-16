@@ -1,12 +1,6 @@
 """
 Salla Odoo Webhook Router
 A Flask application to receive webhooks from Salla and forward them to Odoo instances.
-Features:
-- Async processing via Celery
-- Admin panel for merchant management
-- Request tracking and logging
-- Signature verification
-- Configurable event blocking
 """
 import os
 import logging
@@ -25,72 +19,53 @@ import click
 
 from config import get_config, Config
 from models import db, User, Merchant, WebhookLog, BlockedEvent
-
-
-# ====================== LOGGING SETUP ======================
+from email_utils import send_welcome_email, send_notification_email
 
 def setup_logging(app: Flask) -> None:
     """Configure application logging."""
     os.makedirs(Config.LOG_DIR, exist_ok=True)
     
-    # File handler
     file_handler = logging.FileHandler(f"{Config.LOG_DIR}/app.log")
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     file_handler.setLevel(getattr(logging, Config.LOG_LEVEL))
     
-    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
     console_handler.setLevel(getattr(logging, Config.LOG_LEVEL))
     
-    # Configure Flask logger
     app.logger.addHandler(file_handler)
     app.logger.addHandler(console_handler)
     app.logger.setLevel(getattr(logging, Config.LOG_LEVEL))
     
-    # Also configure root logger for libraries
     logging.getLogger().addHandler(file_handler)
 
 
-# ====================== APPLICATION FACTORY ======================
 
 def create_app() -> Flask:
-    """
-    Application factory function.
-    
-    Creates and configures the Flask application with all extensions.
-    """
     app = Flask(__name__)
     
-    # Load configuration
     config = get_config()
     app.config.from_object(config)
     
-    # Handle proxy headers (for running behind nginx/load balancer)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
-    # Setup logging
     setup_logging(app)
     
-    # Initialize extensions
     db.init_app(app)
     init_login_manager(app)
     init_admin(app)
     
-    # Register routes
     register_routes(app)
     
-    # Register CLI commands
     register_cli_commands(app)
     
     return app
 
 
-# ====================== LOGIN MANAGER ======================
 
 def init_login_manager(app: Flask) -> None:
     """Initialize Flask-Login."""
@@ -103,7 +78,6 @@ def init_login_manager(app: Flask) -> None:
         return db.session.get(User, int(user_id))
 
 
-# ====================== ADMIN PANEL ======================
 
 class SecureAdminIndexView(AdminIndexView):
     """Secured admin index view."""
@@ -168,11 +142,7 @@ class MerchantView(SecureModelView):
     
     def on_model_change(self, form, model, is_created):
         """Send welcome email when a new merchant is created."""
-        if is_created:
-            from email_utils import send_welcome_email
-            from config import Config
-            
-            # Send welcome email
+        if is_created and model.email:
             try:
                 email_sent = send_welcome_email(
                     merchant_name=model.name or model.merchant_id,
@@ -218,12 +188,11 @@ class WebhookLogView(SecureModelView):
     
     can_create = False
     can_edit = False
-    can_delete = True  # Allow cleanup
+    can_delete = True
     can_export = True
     can_view_details = True
     page_size = 50
     
-    # Add custom actions
     def _get_retry_action_url(self, model_id):
         return url_for('retry_webhook', log_id=model_id)
     
@@ -290,7 +259,6 @@ class UserView(SecureModelView):
     }
     
     def on_model_change(self, form, model, is_created):
-        """Hash password if provided."""
         if form.password.data:
             model.set_password(form.password.data)
 
@@ -301,7 +269,6 @@ class DashboardView(SecureAdminIndexView):
     @expose('/')
     def index(self):
         """Render dashboard with statistics."""
-        # Get statistics
         merchants_total = Merchant.query.count()
         merchants_active = Merchant.query.filter_by(active=True).count()
         
@@ -310,13 +277,11 @@ class DashboardView(SecureAdminIndexView):
         webhooks_failed = WebhookLog.query.filter_by(status="failed").count()
         total_webhooks = WebhookLog.query.count()
         
-        # Get active merchants (with recent activity)
         active_merchants = Merchant.query.filter_by(active=True)\
             .order_by(Merchant.last_webhook_at.desc())\
             .limit(10)\
             .all()
         
-        # Get recent logs
         recent_logs = WebhookLog.query\
             .order_by(WebhookLog.received_at.desc())\
             .limit(10)\
@@ -357,12 +322,127 @@ def init_admin(app: Flask) -> None:
     ))
 
 
+def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload: dict) -> None:
+    """
+    Handle app.settings.updated event by auto-creating a not-activated merchant.
+    """    
+    try:
+        data = payload.get("data", {})
+        settings = data.get("settings", {})
+        
+        email = settings.get("email", "")
+        company_name = settings.get("company", "")
+        odoo_url = settings.get("url", "")
+        
+        if not email or not odoo_url:
+            app.logger.warning(
+                f"[{request_id}] app.settings.updated missing required fields: "
+                f"email={email}, url={odoo_url}"
+            )
+            return
+        
+        if not odoo_url.endswith("/webhook") and not odoo_url.endswith("/salla/webhook"):
+            odoo_url = odoo_url.rstrip("/") + "/salla/webhook"
+        
+        existing_merchant = Merchant.query.filter_by(merchant_id=merchant_id).first()
+        
+        if existing_merchant:
+            app.logger.info(
+                f"[{request_id}] Updating existing merchant {merchant_id}"
+            )
+            existing_merchant.email = email
+            existing_merchant.name = company_name or merchant_id
+            existing_merchant.odoo_url = odoo_url
+            existing_merchant.updated_at = datetime.utcnow()
+            db.session.commit()
+            
+            app.logger.info(
+                f"[{request_id}] Updated merchant {merchant_id}: "
+                f"{company_name} ({email})"
+            )
+            return
+        
+        new_merchant = Merchant(
+            merchant_id=merchant_id,
+            name=company_name or f"Merchant {merchant_id}",
+            email=email,
+            odoo_url=odoo_url,
+            active=False, 
+        )
+        
+        db.session.add(new_merchant)
+        db.session.commit()
+        
+        app.logger.info(
+            f"[{request_id}] Created new merchant {merchant_id}: "
+            f"{new_merchant.name} ({email}) - NOT ACTIVATED"
+        )
+        
+        try:
+            email_sent = send_welcome_email(
+                merchant_name=new_merchant.name,
+                merchant_email=email,
+                merchant_id=merchant_id,
+                smtp_host=Config.SMTP_HOST,
+                smtp_port=Config.SMTP_PORT,
+                smtp_user=Config.SMTP_USER,
+                smtp_password=Config.SMTP_PASSWORD,
+                from_email=Config.SMTP_FROM_EMAIL,
+                from_name=Config.SMTP_FROM_NAME
+            )
+            
+            if email_sent:
+                app.logger.info(
+                    f"[{request_id}] Welcome email sent to {email}"
+                )
+            else:
+                app.logger.warning(
+                    f"[{request_id}] Welcome email could not be sent to {email}"
+                )
+        except Exception as e:
+            app.logger.warning(
+                f"[{request_id}] Failed to send welcome email to {email}: {str(e)}"
+            )
+        try:
+            if Config.SUPPORT_EMAIL:
+                support_sent = send_notification_email(
+                    merchant_name=new_merchant.name,
+                    merchant_email=email,
+                    merchant_id=merchant_id,
+                    odoo_url=odoo_url,
+                    support_email=Config.SUPPORT_EMAIL,
+                    smtp_host=Config.SMTP_HOST,
+                    smtp_port=Config.SMTP_PORT,
+                    smtp_user=Config.SMTP_USER,
+                    smtp_password=Config.SMTP_PASSWORD,
+                    from_email=Config.SMTP_FROM_EMAIL,
+                    from_name=Config.SMTP_FROM_NAME
+                )
+                
+                if support_sent:
+                    app.logger.info(
+                        f"[{request_id}] Support notification sent to {Config.SUPPORT_EMAIL}"
+                    )
+                else:
+                    app.logger.warning(
+                        f"[{request_id}] Support notification could not be sent"
+                    )
+        except Exception as e:
+            app.logger.warning(
+                f"[{request_id}] Failed to send support notification: {str(e)}"
+            )
+
+    except Exception as e:
+        app.logger.error(
+            f"[{request_id}] Error handling app.settings.updated: {str(e)}"
+        )
+        
 # ====================== ROUTES ======================
 
 def register_routes(app: Flask) -> None:
     """Register all application routes."""
     
-    from tasks import forward_webhook, verify_signature, compute_payload_hash
+    from tasks import forward_webhook, verify_signature
     
     @app.route("/")
     def index():
@@ -466,7 +546,9 @@ def register_routes(app: Flask) -> None:
                 "reason": "blocked_event"
             }), 200
         
-        # Prepare headers for forwarding
+        if event == "app.settings.updated":
+            handle_app_settings_updated(app, request_id, merchant_id, payload)
+
         headers_to_forward = {
             k: v for k, v in request.headers.items()
             if k.lower() not in (
@@ -475,7 +557,6 @@ def register_routes(app: Flask) -> None:
             )
         }
         
-        # Update merchant statistics (quick update)
         merchant = Merchant.query.filter_by(
             merchant_id=merchant_id, active=True
         ).first()
@@ -484,7 +565,6 @@ def register_routes(app: Flask) -> None:
             db.session.commit()
         
         # Queue for async processing
-        # Convert bytes to string for JSON serialization
         forward_webhook.delay(
             request_id=request_id,
             merchant_id=merchant_id,
@@ -498,46 +578,6 @@ def register_routes(app: Flask) -> None:
             "status": "queued",
             "request_id": request_id,
         }), 200
-    
-    @app.route("/health")
-    def health():
-        """
-        Health check endpoint.
-        
-        Returns basic health status. For production, consider adding
-        checks for database and Celery connectivity.
-        """
-        health_status = {
-            "status": "healthy",
-            "service": "salla-odoo-router",
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-        
-        # Optional: Check database connectivity
-        try:
-            db.session.execute(db.text("SELECT 1"))
-            health_status["database"] = "connected"
-        except Exception as e:
-            health_status["status"] = "degraded"
-            health_status["database"] = f"error: {str(e)}"
-        
-        status_code = 200 if health_status["status"] == "healthy" else 503
-        return jsonify(health_status), status_code
-    
-    @app.route("/health/ready")
-    def readiness():
-        """Kubernetes-style readiness probe."""
-        try:
-            # Check database
-            db.session.execute(db.text("SELECT 1"))
-            return jsonify({"ready": True}), 200
-        except Exception:
-            return jsonify({"ready": False}), 503
-    
-    @app.route("/health/live")
-    def liveness():
-        """Kubernetes-style liveness probe."""
-        return jsonify({"alive": True}), 200
     
     @app.route("/metrics")
     def metrics():
@@ -795,9 +835,6 @@ def register_cli_commands(app: Flask) -> None:
         
         db.session.commit()
         print(f"Deleted {deleted} logs older than {days} days")
-
-
-# ====================== APPLICATION INSTANCE ======================
 
 app = create_app()
 

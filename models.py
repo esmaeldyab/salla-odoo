@@ -43,7 +43,7 @@ class Merchant(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     merchant_id = db.Column(db.String(50), unique=True, nullable=False, index=True)
     name = db.Column(db.String(100))
-    email = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255))
     odoo_url = db.Column(db.String(500), nullable=False)
     active = db.Column(db.Boolean, default=True, index=True)
     

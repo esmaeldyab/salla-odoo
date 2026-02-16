@@ -6,6 +6,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -181,29 +182,60 @@ This is an automated message from the Salla Integration Platform.
         return False
 
 
-def send_welcome_email_async(
+
+def send_notification_email(
     merchant_name: str,
     merchant_email: str,
     merchant_id: str,
-    config: dict
-) -> None:
-    """
-    Async wrapper for sending welcome email (to be used with Celery).
-    
-    Args:
-        merchant_name: Name of the merchant
-        merchant_email: Email address of the merchant
-        merchant_id: Merchant ID
-        config: Configuration dictionary with SMTP settings
-    """
-    send_welcome_email(
-        merchant_name=merchant_name,
-        merchant_email=merchant_email,
-        merchant_id=merchant_id,
-        smtp_host=config.get('SMTP_HOST', 'localhost'),
-        smtp_port=config.get('SMTP_PORT', 587),
-        smtp_user=config.get('SMTP_USER', ''),
-        smtp_password=config.get('SMTP_PASSWORD', ''),
-        from_email=config.get('SMTP_FROM_EMAIL', 'noreply@fsolutions.sa'),
-        from_name=config.get('SMTP_FROM_NAME', 'FSolutions - Salla Integration')
-    )
+    odoo_url: str,
+    support_email: str,
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_password: str,
+    from_email: str,
+    from_name: str = "FSolutions - Salla Integration"
+) -> bool:
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f'New Merchant Installation: {merchant_name} ({merchant_id})'
+        msg['From'] = f'{from_name} <{from_email}>'
+        msg['To'] = support_email
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        
+        text_body = f"""
+Hi,
+
+A new merchant has installed the Salla Integration app and a merchant 
+record has been automatically created in the system.
+
+Account Details:
+- Merchant ID: {merchant_id}
+- Merchant Name: {merchant_name}
+- Odoo Webhook URL:  {odoo_url}
+- Installation Time: {now}
+- Status: NOT ACTIVATED (requires manual activation)
+
+Webhooks will NOT be forwarded until manually activated
+Login to admin panel: https://salla.fsodoo.org
+
+Best regards,
+Facilitating Solutions
+
+---
+This is an automated message from the Salla Integration Platform.
+"""
+        
+        msg.attach(MIMEText(text_body, 'plain'))
+        
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        
+        logger.info(f"Notification email sent to {support_email} for merchant {merchant_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send notification email to {support_email}: {str(e)}")
+        return False
