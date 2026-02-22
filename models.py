@@ -44,9 +44,13 @@ class Merchant(db.Model):
     merchant_id = db.Column(db.String(50), unique=True, nullable=False, index=True)
     name = db.Column(db.String(100))
     email = db.Column(db.String(255))
-    odoo_url = db.Column(db.String(500), nullable=False)
-    active = db.Column(db.Boolean, default=True, index=True)
-    
+    odoo_url = db.Column(db.String(500), nullable=True)
+    active = db.Column(db.Boolean, default=False, index=True)
+
+    # OAuth tokens — populated on app.store.authorize
+    access_token = db.Column(db.String(2048))
+    refresh_token = db.Column(db.String(2048))
+
     # Metadata
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -72,6 +76,15 @@ class Merchant(db.Model):
     __table_args__ = (
         Index("ix_merchant_active_id", "merchant_id", "active"),
     )
+
+    def update_tokens(
+        self,
+        access_token: str,
+        refresh_token: str,
+    ) -> None:
+        """Persist new OAuth tokens received from app.store.authorize."""
+        self.access_token = access_token
+        self.refresh_token = refresh_token
 
     def increment_webhook_count(self) -> None:
         self.webhook_count = (self.webhook_count or 0) + 1

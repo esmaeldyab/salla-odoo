@@ -133,7 +133,8 @@ class MerchantView(SecureModelView):
     form_excluded_columns = [
         "logs", "webhook_count", "last_webhook_at",
         "last_success_at", "last_failure_at", "failure_count",
-        "created_at", "updated_at"
+        "created_at", "updated_at",
+        "access_token", "refresh_token",
     ]
     
     can_export = True
@@ -322,10 +323,56 @@ def init_admin(app: Flask) -> None:
     ))
 
 
+def handle_app_store_authorize(app, request_id: str, merchant_id: str, payload: dict) -> None:
+    """
+    Handle app.store.authorize — create the merchant record (inactive) and store
+    the OAuth tokens.  This fires before app.settings.updated, so odoo_url is
+    left empty until settings arrive.
+    """
+    try:
+        data = payload.get("data", {})
+
+        access_token  = data.get("access_token", "")
+        refresh_token = data.get("refresh_token", "")
+
+        existing = Merchant.query.filter_by(merchant_id=merchant_id).first()
+
+        if existing:
+            existing.update_tokens(access_token, refresh_token)
+            existing.updated_at = datetime.utcnow()
+            db.session.commit()
+            app.logger.info(
+                f"[{request_id}] Updated OAuth tokens for existing merchant {merchant_id}"
+            )
+            return
+
+        new_merchant = Merchant(
+            merchant_id=merchant_id,
+            name=f"Merchant {merchant_id}",
+            odoo_url=None,
+            active=False,
+        )
+        new_merchant.update_tokens(access_token, refresh_token)
+        db.session.add(new_merchant)
+        db.session.commit()
+
+        app.logger.info(
+            f"[{request_id}] Created merchant stub for {merchant_id} "
+            f"(tokens stored, awaiting app.settings.updated)"
+        )
+
+    except Exception as e:
+        app.logger.error(
+            f"[{request_id}] Error handling app.store.authorize: {str(e)}"
+        )
+
+
 def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload: dict) -> None:
     """
-    Handle app.settings.updated event by auto-creating a not-activated merchant.
-    """    
+    Handle app.settings.updated — fill in the Odoo URL, name and email on the
+    merchant stub that was created by app.store.authorize.  If no stub exists
+    yet (edge case / direct call) the merchant is created here instead.
+    """
     try:
         data = payload.get("data", {})
         settings = data.get("settings", {})
@@ -333,109 +380,107 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
         email = settings.get("email", "")
         company_name = settings.get("company", "")
         odoo_url = settings.get("url", "")
-        
-        if not email or not odoo_url:
+
+        if not odoo_url:
             app.logger.warning(
-                f"[{request_id}] app.settings.updated missing required fields: "
-                f"email={email}, url={odoo_url}"
+                f"[{request_id}] app.settings.updated missing 'url' field — skipping"
             )
             return
-        
-        if not odoo_url.endswith("/webhook") and not odoo_url.endswith("/salla/webhook"):
-            odoo_url = odoo_url.rstrip("/") + "/salla/webhook"
-        
+
+        if not odoo_url.endswith("/orders") and not odoo_url.endswith("/salla/webhook/orders"):
+            odoo_url = odoo_url.rstrip("/") + "/salla/webhook/orders"
+
         existing_merchant = Merchant.query.filter_by(merchant_id=merchant_id).first()
-        
+
         if existing_merchant:
-            app.logger.info(
-                f"[{request_id}] Updating existing merchant {merchant_id}"
-            )
-            existing_merchant.email = email
-            existing_merchant.name = company_name or merchant_id
+            is_new = existing_merchant.odoo_url is None
+
+            existing_merchant.email = email or existing_merchant.email
+            existing_merchant.name = company_name or existing_merchant.name or merchant_id
             existing_merchant.odoo_url = odoo_url
             existing_merchant.updated_at = datetime.utcnow()
             db.session.commit()
-            
+
             app.logger.info(
                 f"[{request_id}] Updated merchant {merchant_id}: "
-                f"{company_name} ({email})"
+                f"{existing_merchant.name} ({email})"
             )
+
+            if is_new and email:
+                _send_merchant_emails(app, request_id, existing_merchant, email, odoo_url)
             return
-        
+
+        # Fallback: merchant stub missing (authorize event was missed)
+        app.logger.warning(
+            f"[{request_id}] No merchant stub found for {merchant_id} — "
+            f"creating from app.settings.updated (app.store.authorize may have been missed)"
+        )
         new_merchant = Merchant(
             merchant_id=merchant_id,
             name=company_name or f"Merchant {merchant_id}",
             email=email,
             odoo_url=odoo_url,
-            active=False, 
+            active=False,
         )
-        
         db.session.add(new_merchant)
         db.session.commit()
-        
+
         app.logger.info(
-            f"[{request_id}] Created new merchant {merchant_id}: "
-            f"{new_merchant.name} ({email}) - NOT ACTIVATED"
+            f"[{request_id}] Created merchant {merchant_id}: "
+            f"{new_merchant.name} ({email}) — NOT ACTIVATED"
         )
-        
-        try:
-            email_sent = send_welcome_email(
-                merchant_name=new_merchant.name,
-                merchant_email=email,
-                merchant_id=merchant_id,
-                smtp_host=Config.SMTP_HOST,
-                smtp_port=Config.SMTP_PORT,
-                smtp_user=Config.SMTP_USER,
-                smtp_password=Config.SMTP_PASSWORD,
-                from_email=Config.SMTP_FROM_EMAIL,
-                from_name=Config.SMTP_FROM_NAME
-            )
-            
-            if email_sent:
-                app.logger.info(
-                    f"[{request_id}] Welcome email sent to {email}"
-                )
-            else:
-                app.logger.warning(
-                    f"[{request_id}] Welcome email could not be sent to {email}"
-                )
-        except Exception as e:
-            app.logger.warning(
-                f"[{request_id}] Failed to send welcome email to {email}: {str(e)}"
-            )
-        try:
-            if Config.SUPPORT_EMAIL:
-                support_sent = send_notification_email(
-                    merchant_name=new_merchant.name,
-                    merchant_email=email,
-                    merchant_id=merchant_id,
-                    odoo_url=odoo_url,
-                    support_email=Config.SUPPORT_EMAIL,
-                    smtp_host=Config.SMTP_HOST,
-                    smtp_port=Config.SMTP_PORT,
-                    smtp_user=Config.SMTP_USER,
-                    smtp_password=Config.SMTP_PASSWORD,
-                    from_email=Config.SMTP_FROM_EMAIL,
-                    from_name=Config.SMTP_FROM_NAME
-                )
-                
-                if support_sent:
-                    app.logger.info(
-                        f"[{request_id}] Support notification sent to {Config.SUPPORT_EMAIL}"
-                    )
-                else:
-                    app.logger.warning(
-                        f"[{request_id}] Support notification could not be sent"
-                    )
-        except Exception as e:
-            app.logger.warning(
-                f"[{request_id}] Failed to send support notification: {str(e)}"
-            )
+
+        if email:
+            _send_merchant_emails(app, request_id, new_merchant, email, odoo_url)
 
     except Exception as e:
         app.logger.error(
             f"[{request_id}] Error handling app.settings.updated: {str(e)}"
         )
+
+
+def _send_merchant_emails(app, request_id: str, merchant, email: str, odoo_url: str) -> None:
+    """Send welcome + support notification emails after a merchant is fully configured."""
+    try:
+        sent = send_welcome_email(
+            merchant_name=merchant.name,
+            merchant_email=email,
+            merchant_id=merchant.merchant_id,
+            smtp_host=Config.SMTP_HOST,
+            smtp_port=Config.SMTP_PORT,
+            smtp_user=Config.SMTP_USER,
+            smtp_password=Config.SMTP_PASSWORD,
+            from_email=Config.SMTP_FROM_EMAIL,
+            from_name=Config.SMTP_FROM_NAME,
+        )
+        if sent:
+            app.logger.info(f"[{request_id}] Welcome email sent to {email}")
+        else:
+            app.logger.warning(f"[{request_id}] Welcome email failed for {email}")
+    except Exception as e:
+        app.logger.warning(f"[{request_id}] Welcome email error: {str(e)}")
+
+    try:
+        if Config.SUPPORT_EMAIL and Config.SEND_SUPPORT_NOTIFICATIONS:
+            sent = send_notification_email(
+                merchant_name=merchant.name,
+                merchant_email=email,
+                merchant_id=merchant.merchant_id,
+                odoo_url=odoo_url,
+                support_email=Config.SUPPORT_EMAIL,
+                smtp_host=Config.SMTP_HOST,
+                smtp_port=Config.SMTP_PORT,
+                smtp_user=Config.SMTP_USER,
+                smtp_password=Config.SMTP_PASSWORD,
+                from_email=Config.SMTP_FROM_EMAIL,
+                from_name=Config.SMTP_FROM_NAME,
+            )
+            if sent:
+                app.logger.info(f"[{request_id}] Support notification sent")
+            else:
+                app.logger.warning(f"[{request_id}] Support notification failed")
+    except Exception as e:
+        app.logger.warning(f"[{request_id}] Support notification error: {str(e)}")
         
 # ====================== ROUTES ======================
 
@@ -546,6 +591,9 @@ def register_routes(app: Flask) -> None:
                 "reason": "blocked_event"
             }), 200
         
+        if event == "app.store.authorize":
+            handle_app_store_authorize(app, request_id, merchant_id, payload)
+
         if event == "app.settings.updated":
             handle_app_settings_updated(app, request_id, merchant_id, payload)
 
