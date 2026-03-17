@@ -34,19 +34,20 @@ Hello {merchant_name},
 
 Welcome to the Salla Integration Platform by FSolutions
 
-Your merchant account has been successfully created and configured.
+Your merchant account has been successfully created.
 
 Account Details:
 - Merchant ID: {merchant_id}
 - Merchant Name: {merchant_name}
 
-Your Salla events will now be seamlessly forwarded to your Odoo instance. 
-The integration is active and ready to process your e-commerce events.
+To complete the integration with your system and activate event synchronization,
+please contact our team so we can finalize the setup and ensure everything is configured correctly for your store.
 
-If you have any questions or need assistance, please don't hesitate to contact our support team.
+If you have any questions or need assistance, please don't hesitate to contact us at: +966530547274
 
 Best regards,
 FSolutions Team
++966530547274
 Facilitating Solutions for Your Business
 
 ---
@@ -136,7 +137,7 @@ This is an automated message from the Salla Integration Platform.
         
         <p>Welcome to the <strong>Salla Integration Platform</strong> by FSolutions</p>
         
-        <p>Your merchant account has been successfully created and configured.</p>
+        <p>Your merchant account has been successfully created.</p>
         
         <div class="info-box">
             <strong>Account Details:</strong><br>
@@ -144,13 +145,14 @@ This is an automated message from the Salla Integration Platform.
             <strong>Merchant Name:</strong> {merchant_name}
         </div>
         
-        <p>Your Salla webhooks will now be seamlessly forwarded to your Odoo instance. 
-        The integration is active and ready to process your e-commerce events.</p>
+        <p>To complete the integration with your system and activate event synchronization,
+        please contact our team so we can finalize the setup and ensure everything is configured correctly for your store.</p>
         
-        <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
+        <p>If you have any questions or need assistance, please don't hesitate to contact us at: +966530547274</p>
         
         <p>Best regards,<br>
         <strong>FSolutions Team</strong><br>
+        <strong>+966530547274</strong><br>
         <em>Facilitating Solutions for Your Business</em></p>
     </div>
     
@@ -188,6 +190,7 @@ def send_notification_email(
     merchant_email: str,
     merchant_id: str,
     odoo_url: str,
+    phone_number: str,
     support_email: str,
     smtp_host: str,
     smtp_port: int,
@@ -213,6 +216,7 @@ Account Details:
 - Merchant ID: {merchant_id}
 - Merchant Name: {merchant_name}
 - Odoo Webhook URL:  {odoo_url}
+- Phone Number: {phone_number}
 - Installation Time: {now}
 - Status: NOT ACTIVATED (requires manual activation)
 
@@ -220,7 +224,6 @@ Webhooks will NOT be forwarded until manually activated
 Login to admin panel: https://salla.fsodoo.org
 
 Best regards,
-Facilitating Solutions
 
 ---
 This is an automated message from the Salla Integration Platform.

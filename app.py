@@ -380,14 +380,9 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
         email = settings.get("email", "")
         company_name = settings.get("company", "")
         odoo_url = settings.get("url", "")
+        phone_number = settings.get("phone_number", "")
 
-        if not odoo_url:
-            app.logger.warning(
-                f"[{request_id}] app.settings.updated missing 'url' field — skipping"
-            )
-            return
-
-        if not odoo_url.endswith("/orders") and not odoo_url.endswith("/salla/webhook/orders"):
+        if odoo_url and not odoo_url.endswith("/orders") and not odoo_url.endswith("/salla/webhook/orders"):
             odoo_url = odoo_url.rstrip("/") + "/salla/webhook/orders"
 
         existing_merchant = Merchant.query.filter_by(merchant_id=merchant_id).first()
@@ -407,7 +402,7 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
             )
 
             if is_new and email:
-                _send_merchant_emails(app, request_id, existing_merchant, email, odoo_url)
+                _send_merchant_emails(app, request_id, existing_merchant, email, odoo_url, phone_number)
             return
 
         # Fallback: merchant stub missing (authorize event was missed)
@@ -431,7 +426,7 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
         )
 
         if email:
-            _send_merchant_emails(app, request_id, new_merchant, email, odoo_url)
+            _send_merchant_emails(app, request_id, new_merchant, email, odoo_url, phone_number)
 
     except Exception as e:
         app.logger.error(
@@ -439,7 +434,7 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
         )
 
 
-def _send_merchant_emails(app, request_id: str, merchant, email: str, odoo_url: str) -> None:
+def _send_merchant_emails(app, request_id: str, merchant, email: str, odoo_url: str, phone_number: str) -> None:
     """Send welcome + support notification emails after a merchant is fully configured."""
     try:
         sent = send_welcome_email(
@@ -467,6 +462,7 @@ def _send_merchant_emails(app, request_id: str, merchant, email: str, odoo_url: 
                 merchant_email=email,
                 merchant_id=merchant.merchant_id,
                 odoo_url=odoo_url,
+                phone_number=phone_number,
                 support_email=Config.SUPPORT_EMAIL,
                 smtp_host=Config.SMTP_HOST,
                 smtp_port=Config.SMTP_PORT,
