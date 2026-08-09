@@ -1,4 +1,5 @@
 
+import secrets
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
@@ -51,6 +52,12 @@ class Merchant(db.Model):
     access_token = db.Column(db.String(2048))
     refresh_token = db.Column(db.String(2048))
 
+    # Bridge API key — identifies AND authenticates this merchant's Odoo
+    # instance when it pulls tokens from POST /api/tokens. The key IS the
+    # identity: there is no merchant-id parameter to forge, so a stolen key
+    # exposes exactly one store.
+    api_key = db.Column(db.String(64), unique=True, index=True)
+
     # Metadata
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -85,6 +92,11 @@ class Merchant(db.Model):
         """Persist new OAuth tokens received from app.store.authorize."""
         self.access_token = access_token
         self.refresh_token = refresh_token
+
+    def generate_api_key(self) -> str:
+        """Generate, store and return a fresh API key for this merchant."""
+        self.api_key = secrets.token_urlsafe(36)
+        return self.api_key
 
     def increment_webhook_count(self) -> None:
         self.webhook_count = (self.webhook_count or 0) + 1

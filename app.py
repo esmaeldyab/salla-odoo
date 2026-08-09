@@ -17,6 +17,8 @@ from flask_admin.actions import action
 from werkzeug.middleware.proxy_fix import ProxyFix
 import click
 
+from sqlalchemy import inspect, text
+
 from config import get_config, Config
 from models import db, User, Merchant, WebhookLog, BlockedEvent
 from email_utils import send_welcome_email, send_notification_email
@@ -353,6 +355,7 @@ def handle_app_store_authorize(app, request_id: str, merchant_id: str, payload: 
             active=False,
         )
         new_merchant.update_tokens(access_token, refresh_token)
+        new_merchant.generate_api_key()
         db.session.add(new_merchant)
         db.session.commit()
 
@@ -417,6 +420,7 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
             odoo_url=odoo_url,
             active=False,
         )
+        new_merchant.generate_api_key()
         db.session.add(new_merchant)
         db.session.commit()
 
@@ -640,6 +644,47 @@ def register_routes(app: Flask) -> None:
         }
         return jsonify(metrics), 200
 
+    @app.route("/api/tokens", methods=["POST"])
+    def api_tokens():
+        """Return the calling merchant's Salla OAuth tokens.
+
+        The X-Api-Key header both identifies and authenticates the merchant:
+        the key is looked up directly, so there is no merchant-id or URL
+        parameter a caller could forge to reach another store's tokens. Any
+        such fields in the request body are ignored.
+        """
+        request_id = str(uuid4())
+        api_key = request.headers.get("X-Api-Key", "").strip()
+
+        if not api_key:
+            app.logger.warning(f"[{request_id}] /api/tokens called without a key")
+            return jsonify({"error": "invalid_api_key"}), 401
+
+        merchant = Merchant.query.filter_by(api_key=api_key, active=True).first()
+        if not merchant:
+            app.logger.warning(
+                f"[{request_id}] /api/tokens called with an unknown or inactive key"
+            )
+            return jsonify({"error": "invalid_api_key"}), 401
+
+        if not merchant.access_token:
+            app.logger.info(
+                f"[{request_id}] /api/tokens: merchant {merchant.merchant_id} "
+                f"has no tokens yet"
+            )
+            return jsonify({"error": "not_authorized_yet"}), 409
+
+        app.logger.info(
+            f"[{request_id}] /api/tokens: issued tokens to merchant "
+            f"{merchant.merchant_id}"
+        )
+        return jsonify({
+            "merchant_id": merchant.merchant_id,
+            "name": merchant.name,
+            "access_token": merchant.access_token,
+            "refresh_token": merchant.refresh_token,
+        }), 200
+
 
 def render_login_page() -> str:
     """Render the login page HTML."""
@@ -809,6 +854,42 @@ def render_login_page() -> str:
 
 # ====================== CLI COMMANDS ======================
 
+def _ensure_api_key_column() -> None:
+    """Add merchants.api_key if it is missing.
+
+    The project has no Alembic/Flask-Migrate and db.create_all() only creates
+    missing tables, never new columns on an existing one. This SQL is valid on
+    both SQLite and PostgreSQL.
+    """
+    inspector = inspect(db.engine)
+    columns = {c["name"] for c in inspector.get_columns("merchants")}
+    if "api_key" not in columns:
+        db.session.execute(
+            text("ALTER TABLE merchants ADD COLUMN api_key VARCHAR(64)")
+        )
+        db.session.commit()
+
+    db.session.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_merchants_api_key "
+            "ON merchants (api_key)"
+        )
+    )
+    db.session.commit()
+
+
+def _backfill_api_keys() -> int:
+    """Give every merchant without an API key a fresh one. Returns the count."""
+    _ensure_api_key_column()
+
+    merchants = Merchant.query.filter(Merchant.api_key.is_(None)).all()
+    for merchant in merchants:
+        merchant.generate_api_key()
+    if merchants:
+        db.session.commit()
+    return len(merchants)
+
+
 def register_cli_commands(app: Flask) -> None:
     """Register Flask CLI commands."""
     
@@ -879,6 +960,16 @@ def register_cli_commands(app: Flask) -> None:
         
         db.session.commit()
         print(f"Deleted {deleted} logs older than {days} days")
+
+    @app.cli.command("backfill-api-keys")
+    def backfill_api_keys():
+        """Add the api_key column if missing and generate keys for merchants."""
+        count = _backfill_api_keys()
+        print(f"Generated API keys for {count} merchant(s)")
+        print("")
+        print("Distribute these to each merchant's Odoo configuration:")
+        for merchant in Merchant.query.order_by(Merchant.merchant_id).all():
+            print(f"  {merchant.merchant_id}  {merchant.name}  {merchant.api_key}")
 
 app = create_app()
 
