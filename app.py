@@ -7,13 +7,15 @@ import logging
 from uuid import uuid4
 from datetime import datetime
 
-from flask import Flask, request, jsonify, abort, redirect, url_for, flash
+from flask import Flask, request, jsonify, abort, redirect, url_for, flash, has_app_context
 from flask_login import (
     LoginManager, login_user, login_required, logout_user, current_user
 )
 from flask_admin import Admin, AdminIndexView, expose
 from flask_admin.contrib.sqla import ModelView
 from flask_admin.actions import action
+from flask_admin.contrib.sqla import filters as sqla_filters
+from markupsafe import Markup, escape
 from werkzeug.middleware.proxy_fix import ProxyFix
 import click
 
@@ -101,14 +103,41 @@ class SecureModelView(ModelView):
         return redirect(url_for("login"))
 
 
+def _copy_button(value: str) -> Markup:
+    return Markup(
+        '<button type="button" class="btn btn-sm btn-outline-secondary copy-btn" '
+        'data-copy="{}" title="Copy"><i class="fas fa-copy"></i></button>'
+    ).format(value)
+
+
+def _secret_list_formatter(view, context, model, name):
+    value = getattr(model, name)
+    if not value:
+        return "-"
+    return Markup('<span class="text-monospace">{}&hellip;</span> {}').format(
+        value[:10], _copy_button(value)
+    )
+
+
+def _secret_detail_formatter(view, context, model, name):
+    value = getattr(model, name)
+    if not value:
+        return "-"
+    return Markup(
+        '<div class="d-flex align-items-start gap-2">'
+        '<code class="text-break flex-grow-1">{}</code>{}</div>'
+    ).format(value, _copy_button(value))
+
+
 class MerchantView(SecureModelView):
     """Admin view for Merchant model."""
     
     column_list = [
-        "merchant_id", "name", "email", "odoo_url", "active",
+        "merchant_id", "name", "email", "odoo_url", "odoo_database", "api_key",
+        "access_token", "refresh_token", "active",
         "webhook_count", "last_webhook_at", "failure_count"
     ]
-    column_searchable_list = ["merchant_id", "name", "email", "odoo_url"]
+    column_searchable_list = ["merchant_id", "name", "email", "odoo_url", "odoo_database"]
     column_filters = ["active", "created_at", "last_webhook_at"]
     column_editable_list = ["active"]
     column_sortable_list = [
@@ -119,6 +148,10 @@ class MerchantView(SecureModelView):
     column_labels = {
         "merchant_id": "Merchant ID",
         "odoo_url": "Odoo Webhook URL",
+        "odoo_database": "Odoo Database",
+        "api_key": "Odoo API Key",
+        "access_token": "Access Token",
+        "refresh_token": "Refresh Token",
         "webhook_count": "Webhooks",
         "last_webhook_at": "Last Webhook",
         "failure_count": "Failures",
@@ -130,19 +163,50 @@ class MerchantView(SecureModelView):
             m.last_webhook_at.strftime("%Y-%m-%d %H:%M") 
             if m.last_webhook_at else "-"
         ),
+        "api_key": _secret_list_formatter,
+        "access_token": _secret_list_formatter,
+        "refresh_token": _secret_list_formatter,
+    }
+
+    column_formatters_detail = {
+        "api_key": _secret_detail_formatter,
+        "access_token": _secret_detail_formatter,
+        "refresh_token": _secret_detail_formatter,
+    }
+
+    column_descriptions = {
+        "odoo_database": (
+            "Leave empty when the Odoo server hosts a single database. "
+            "Otherwise enter the exact database name webhooks must be delivered to."
+        ),
     }
     
     form_excluded_columns = [
         "logs", "webhook_count", "last_webhook_at",
         "last_success_at", "last_failure_at", "failure_count",
         "created_at", "updated_at",
-        "access_token", "refresh_token",
+        "access_token", "refresh_token", "api_key",
     ]
-    
+
     can_export = True
     can_view_details = True
     page_size = 25
-    
+
+    @action(
+        "regenerate_api_key",
+        "Regenerate API key",
+        "This invalidates the merchant's current key and their Odoo will stop "
+        "syncing until the new key is entered. Continue?",
+    )
+    def action_regenerate_api_key(self, ids):
+        """Issue a fresh API key for the selected merchants."""
+        count = 0
+        for merchant in Merchant.query.filter(Merchant.id.in_(ids)).all():
+            merchant.generate_api_key()
+            count += 1
+        db.session.commit()
+        flash(f"Regenerated the API key for {count} merchant(s).", "success")
+
     def on_model_change(self, form, model, is_created):
         """Send welcome email when a new merchant is created."""
         if is_created and model.email:
@@ -167,62 +231,151 @@ class MerchantView(SecureModelView):
                 flash(f'Merchant created but email sending failed: {str(e)}', 'warning')
 
 
+class ProductIdFilter(sqla_filters.BaseSQLAFilter):
+    def apply(self, query, value, alias=None):
+        return query.filter(WebhookLog.salla_product_ids.like(f"%,{value.strip()},%"))
+
+    def operation(self):
+        return "contains"
+
+
+def _event_type_options():
+    if not has_app_context():
+        return []
+    rows = db.session.query(WebhookLog.event_type).distinct().order_by(WebhookLog.event_type)
+    return [(event, event) for (event,) in rows if event]
+
+
+def _merchant_options():
+    if not has_app_context():
+        return []
+    return [
+        (m.merchant_id, f"{m.name or m.merchant_id} ({m.merchant_id})")
+        for m in Merchant.query.order_by(Merchant.name).all()
+    ]
+
+
+LOG_STATUS_OPTIONS = [
+    ("pending", "pending"),
+    ("forwarded", "forwarded"),
+    ("failed", "failed"),
+    ("ignored", "ignored"),
+]
+
+
 class WebhookLogView(SecureModelView):
     """Admin view for WebhookLog model (read-only with retry capability)."""
-    
+
     column_list = [
-        "request_id", "event_type", "salla_merchant_id",
-        "status", "odoo_status_code", "retry_count", "received_at"
+        "received_at", "merchant.name", "salla_merchant_id", "event_type",
+        "salla_order_id", "order_reference", "status", "odoo_status_code",
+        "retry_count", "error_message", "request_id",
     ]
-    column_searchable_list = ["request_id", "event_type", "salla_merchant_id"]
-    column_filters = ["status", "event_type", "received_at", "retry_count"]
+    column_searchable_list = [
+        "request_id", "event_type", "salla_merchant_id", "merchant.name",
+        "salla_order_id", "order_reference", "salla_customer_id",
+        "salla_product_ids", "error_message",
+    ]
+    column_filters = [
+        sqla_filters.FilterEqual(WebhookLog.salla_merchant_id, "Merchant", options=_merchant_options),
+        sqla_filters.FilterLike(WebhookLog.salla_merchant_id, "Merchant ID"),
+        "merchant.name",
+        sqla_filters.FilterEqual(WebhookLog.event_type, "Event", options=_event_type_options),
+        sqla_filters.FilterNotEqual(WebhookLog.event_type, "Event", options=_event_type_options),
+        sqla_filters.FilterLike(WebhookLog.event_type, "Event"),
+        sqla_filters.FilterEqual(WebhookLog.status, "Status", options=LOG_STATUS_OPTIONS),
+        sqla_filters.FilterNotEqual(WebhookLog.status, "Status", options=LOG_STATUS_OPTIONS),
+        sqla_filters.FilterEqual(WebhookLog.salla_order_id, "Order ID"),
+        sqla_filters.FilterEqual(WebhookLog.order_reference, "Order Reference"),
+        ProductIdFilter(WebhookLog.salla_product_ids, "Product ID"),
+        sqla_filters.FilterEqual(WebhookLog.salla_customer_id, "Customer ID"),
+        sqla_filters.FilterLike(WebhookLog.request_id, "Request ID"),
+        sqla_filters.DateTimeBetweenFilter(WebhookLog.received_at, "Received"),
+        sqla_filters.DateTimeGreaterFilter(WebhookLog.received_at, "Received"),
+        sqla_filters.DateTimeSmallerFilter(WebhookLog.received_at, "Received"),
+        sqla_filters.DateTimeBetweenFilter(WebhookLog.forwarded_at, "Forwarded"),
+        sqla_filters.IntEqualFilter(WebhookLog.odoo_status_code, "Odoo HTTP Status"),
+        sqla_filters.FilterEmpty(WebhookLog.odoo_status_code, "Odoo HTTP Status"),
+        sqla_filters.IntEqualFilter(WebhookLog.retry_count, "Retries"),
+        sqla_filters.IntGreaterFilter(WebhookLog.retry_count, "Retries"),
+        sqla_filters.FilterLike(WebhookLog.error_message, "Error Message"),
+        sqla_filters.FilterEmpty(WebhookLog.error_message, "Error Message"),
+        sqla_filters.FilterLike(WebhookLog.odoo_response, "Odoo Response"),
+        sqla_filters.FilterLike(WebhookLog.payload, "Payload"),
+    ]
     column_sortable_list = [
-        "received_at", "status", "event_type", "retry_count", "odoo_status_code"
+        "received_at", "status", "event_type", "retry_count", "odoo_status_code",
+        "salla_merchant_id", "salla_order_id", "order_reference",
+        ("merchant.name", "merchant.name"),
     ]
     column_default_sort = ("received_at", True)  # Newest first
-    
+
+    column_labels = {
+        "merchant.name": "Merchant",
+        "salla_merchant_id": "Merchant ID",
+        "event_type": "Event",
+        "salla_order_id": "Order ID",
+        "order_reference": "Order Ref",
+        "salla_customer_id": "Customer ID",
+        "salla_product_ids": "Product IDs",
+        "odoo_status_code": "Odoo HTTP",
+        "retry_count": "Retries",
+        "error_message": "Error",
+    }
+
     column_formatters = {
         "received_at": lambda v, c, m, p: (
             m.received_at.strftime("%Y-%m-%d %H:%M:%S") 
             if m.received_at else "-"
         ),
         "request_id": lambda v, c, m, p: m.request_id[:8] + "..." if m.request_id else "-",
+        "error_message": lambda v, c, m, p: (
+            (m.error_message[:80] + "...") if m.error_message and len(m.error_message) > 80
+            else (m.error_message or "")
+        ),
     }
-    
+
+    column_formatters_detail = {
+        "salla_product_ids": lambda v, c, m, p: (m.salla_product_ids or "").strip(",").replace(",", ", "),
+    }
+
     can_create = False
     can_edit = False
     can_delete = True
     can_export = True
     can_view_details = True
     page_size = 50
-    
-    def _get_retry_action_url(self, model_id):
-        return url_for('retry_webhook', log_id=model_id)
-    
-    column_extra_row_actions = None  # Will use action instead
-    
-    @action('retry_selected', 'Retry Selected', 'Are you sure you want to retry the selected webhooks?')
+
+    @expose('/')
+    def index_view(self):
+        self._refresh_filters_cache()
+        return super().index_view()
+
+    @action(
+        'retry_selected',
+        'Retry Selected',
+        'Re-send the selected webhooks to Odoo, whatever their status? '
+        'Webhooks Odoo already processed will be processed again.',
+    )
     def action_retry_selected(self, ids):
-        """Retry selected failed webhooks."""
+        """Re-send the selected webhooks, whatever their status."""
         from tasks import retry_webhook_by_id
-        
-        success_count = 0
-        skip_count = 0
-        
-        for log_id in ids:
-            log_entry = WebhookLog.query.get(log_id)
-            if log_entry and log_entry.status == 'failed':
-                # Queue retry task
-                retry_webhook_by_id.delay(log_id)
-                success_count += 1
+
+        logs = WebhookLog.query.filter(WebhookLog.id.in_(ids)).all()
+        queued = 0
+        skipped = 0
+        for log_entry in logs:
+            if log_entry.payload:
+                retry_webhook_by_id.delay(log_entry.id)
+                queued += 1
             else:
-                skip_count += 1
-        
-        if success_count:
-            flash(f'Queued {success_count} webhook(s) for retry.', 'success')
-        if skip_count:
-            flash(f'Skipped {skip_count} webhook(s) (not in failed status).', 'warning')
-    
+                skipped += 1
+
+        if queued:
+            flash(f'Queued {queued} webhook(s) for retry.', 'success')
+        if skipped:
+            flash(f'Skipped {skipped} webhook(s) with no stored payload.', 'warning')
+
     @action('retry_all_failed', 'Retry All Failed', 'Are you sure you want to retry ALL failed webhooks?')
     def action_retry_all_failed(self, ids):
         """Retry all failed webhooks (ignores selection)."""
@@ -384,6 +537,7 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
         company_name = settings.get("company", "")
         odoo_url = settings.get("url", "")
         phone_number = settings.get("phone_number", "")
+        odoo_database = (settings.get("database") or settings.get("db") or "").strip()
 
         if odoo_url and not odoo_url.endswith("/orders") and not odoo_url.endswith("/salla/webhook/orders"):
             odoo_url = odoo_url.rstrip("/") + "/salla/webhook/orders"
@@ -396,6 +550,8 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
             existing_merchant.email = email or existing_merchant.email
             existing_merchant.name = company_name or existing_merchant.name or merchant_id
             existing_merchant.odoo_url = odoo_url
+            if odoo_database:
+                existing_merchant.odoo_database = odoo_database
             existing_merchant.updated_at = datetime.utcnow()
             db.session.commit()
 
@@ -418,6 +574,7 @@ def handle_app_settings_updated(app, request_id: str, merchant_id: str, payload:
             name=company_name or f"Merchant {merchant_id}",
             email=email,
             odoo_url=odoo_url,
+            odoo_database=odoo_database or None,
             active=False,
         )
         new_merchant.generate_api_key()
@@ -878,6 +1035,80 @@ def _ensure_api_key_column() -> None:
     db.session.commit()
 
 
+SCHEMA_COLUMNS = {
+    "merchants": [
+        ("odoo_database", "VARCHAR(255)"),
+    ],
+    "webhook_logs": [
+        ("salla_order_id", "VARCHAR(50)"),
+        ("order_reference", "VARCHAR(50)"),
+        ("salla_customer_id", "VARCHAR(50)"),
+        ("salla_product_ids", "TEXT"),
+    ],
+}
+
+SCHEMA_INDEXES = [
+    ("ix_webhook_logs_salla_merchant_id", "webhook_logs", "salla_merchant_id"),
+    ("ix_webhook_logs_salla_order_id", "webhook_logs", "salla_order_id"),
+    ("ix_webhook_logs_order_reference", "webhook_logs", "order_reference"),
+    ("ix_webhook_logs_salla_customer_id", "webhook_logs", "salla_customer_id"),
+]
+
+
+def _ensure_schema() -> None:
+    inspector = inspect(db.engine)
+    tables = set(inspector.get_table_names())
+    for table, columns in SCHEMA_COLUMNS.items():
+        if table not in tables:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        for name, ddl_type in columns:
+            if name not in existing:
+                _run_ddl(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
+    for index, table, column in SCHEMA_INDEXES:
+        if table in tables:
+            _run_ddl(f"CREATE INDEX IF NOT EXISTS {index} ON {table} ({column})")
+
+
+def _run_ddl(statement: str) -> None:
+    try:
+        db.session.execute(text(statement))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+
+
+def _backfill_log_refs(batch_size: int = 500) -> int:
+    import json as _json
+
+    _ensure_schema()
+    updated = 0
+    last_id = 0
+    while True:
+        logs = (
+            WebhookLog.query
+            .filter(WebhookLog.id > last_id, WebhookLog.payload.isnot(None))
+            .order_by(WebhookLog.id)
+            .limit(batch_size)
+            .all()
+        )
+        if not logs:
+            break
+        for log_entry in logs:
+            last_id = log_entry.id
+            if log_entry.salla_order_id or log_entry.salla_product_ids or log_entry.salla_customer_id:
+                continue
+            try:
+                payload = _json.loads(log_entry.payload)
+            except ValueError:
+                continue
+            log_entry.apply_payload_refs(payload)
+            updated += 1
+        db.session.commit()
+    return updated
+
+
 def _backfill_api_keys() -> int:
     """Give every merchant without an API key a fresh one. Returns the count."""
     _ensure_api_key_column()
@@ -899,6 +1130,7 @@ def register_cli_commands(app: Flask) -> None:
         os.makedirs(Config.LOG_DIR, exist_ok=True)
         
         db.create_all()
+        _ensure_schema()
         print("Database tables created")
         
         # Create default admin if not exists
@@ -960,6 +1192,13 @@ def register_cli_commands(app: Flask) -> None:
         
         db.session.commit()
         print(f"Deleted {deleted} logs older than {days} days")
+
+    @app.cli.command("upgrade-db")
+    def upgrade_db():
+        """Add missing columns/indexes and index order, product and customer ids of existing logs."""
+        _ensure_schema()
+        count = _backfill_log_refs()
+        print(f"Schema up to date; indexed references on {count} existing log(s)")
 
     @app.cli.command("backfill-api-keys")
     def backfill_api_keys():

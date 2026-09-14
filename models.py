@@ -9,6 +9,61 @@ from sqlalchemy import Index
 db = SQLAlchemy()
 
 
+def _ref(value):
+    if value is None or value == "" or isinstance(value, (dict, list)):
+        return None
+    return str(value)[:50]
+
+
+def extract_payload_refs(payload: dict) -> dict:
+    refs = {"order_id": None, "order_reference": None, "customer_id": None, "product_ids": None}
+    if not isinstance(payload, dict):
+        return refs
+
+    event = str(payload.get("event") or "")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return refs
+
+    order = data.get("order") if isinstance(data.get("order"), dict) else None
+    product_ids = []
+
+    if event.startswith("order."):
+        order = order or data
+        refs["order_id"] = _ref(order.get("id"))
+        refs["order_reference"] = _ref(order.get("reference_id"))
+    elif event.startswith("product."):
+        product_ids.append(data.get("id"))
+    elif event.startswith("customer."):
+        refs["customer_id"] = _ref(data.get("id"))
+    else:
+        refs["order_id"] = _ref(data.get("order_id") or (order or {}).get("id"))
+        refs["order_reference"] = _ref(
+            data.get("order_reference_id") or (order or {}).get("reference_id")
+        )
+
+    if order:
+        customer = order.get("customer")
+        if isinstance(customer, dict) and not refs["customer_id"]:
+            refs["customer_id"] = _ref(customer.get("id"))
+        for item in order.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            product = item.get("product")
+            if isinstance(product, dict):
+                product_ids.append(product.get("id"))
+            product_ids.append(item.get("product_id"))
+
+    ids = []
+    for pid in product_ids:
+        pid = _ref(pid)
+        if pid and pid not in ids:
+            ids.append(pid)
+    if ids:
+        refs["product_ids"] = "," + ",".join(ids) + ","
+    return refs
+
+
 class User(db.Model, UserMixin):
     """Admin user model."""
     
@@ -46,6 +101,7 @@ class Merchant(db.Model):
     name = db.Column(db.String(100))
     email = db.Column(db.String(255))
     odoo_url = db.Column(db.String(500), nullable=True)
+    odoo_database = db.Column(db.String(255), nullable=True)
     active = db.Column(db.Boolean, default=False, index=True)
 
     # OAuth tokens — populated on app.store.authorize
@@ -124,7 +180,12 @@ class WebhookLog(db.Model):
     
     # Event details
     event_type = db.Column(db.String(100), index=True)
-    salla_merchant_id = db.Column(db.String(50))
+    salla_merchant_id = db.Column(db.String(50), index=True)
+
+    salla_order_id = db.Column(db.String(50), index=True)
+    order_reference = db.Column(db.String(50), index=True)
+    salla_customer_id = db.Column(db.String(50), index=True)
+    salla_product_ids = db.Column(db.Text)
     
     # Status tracking
     status = db.Column(db.String(20), default="pending", index=True)  # pending, forwarded, failed, ignored
@@ -154,6 +215,13 @@ class WebhookLog(db.Model):
     __table_args__ = (
         Index("ix_webhook_log_cleanup", "received_at", "status"),
     )
+
+    def apply_payload_refs(self, payload: dict) -> None:
+        refs = extract_payload_refs(payload)
+        self.salla_order_id = refs["order_id"]
+        self.order_reference = refs["order_reference"]
+        self.salla_customer_id = refs["customer_id"]
+        self.salla_product_ids = refs["product_ids"]
 
     def mark_forwarded(self, status_code: int, response: str = None) -> None:
         self.status = "forwarded"
