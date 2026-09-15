@@ -480,5 +480,45 @@
             window.scrollTo({ top: 0, behavior: 'smooth' });
         });
     }
+
+    function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+        return new Promise(function (resolve, reject) {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(area);
+            ok ? resolve() : reject();
+        });
+    }
+
+    document.addEventListener('click', function (e) {
+        const button = e.target.closest('.copy-btn');
+        if (!button) {
+            return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const icon = button.querySelector('i');
+        copyText(button.dataset.copy).then(function () {
+            icon.className = 'fas fa-check';
+            button.title = 'Copied';
+        }).catch(function () {
+            icon.className = 'fas fa-times';
+            button.title = 'Copy failed';
+        }).finally(function () {
+            setTimeout(function () {
+                icon.className = 'fas fa-copy';
+                button.title = 'Copy';
+            }, 1500);
+        });
+    });
 </script>
 {% endblock %}

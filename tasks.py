@@ -24,6 +24,9 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 from uuid import uuid4
 
+from http.cookiejar import DefaultCookiePolicy
+from urllib.parse import urlsplit, urlunsplit
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -89,7 +92,8 @@ def create_http_session() -> requests.Session:
     
     session.mount("http://", adapter)
     session.mount("https://", adapter)
-    
+    session.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+
     return session
 
 
@@ -103,6 +107,100 @@ def get_http_session() -> requests.Session:
     if _http_session is None:
         _http_session = create_http_session()
     return _http_session
+
+
+# ====================== ODOO DATABASE SELECTION ======================
+
+class OdooDatabaseError(Exception):
+    pass
+
+
+_odoo_db_sessions: Dict[Tuple[str, str], str] = {}
+
+
+def odoo_base_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
+def get_odoo_db_session(session: requests.Session, target_url: str, database: str, timeout: int,
+                        refresh: bool = False) -> str:
+    base = odoo_base_url(target_url)
+    key = (base, database)
+    if not refresh and key in _odoo_db_sessions:
+        return _odoo_db_sessions[key]
+
+    available = _odoo_database_list(session, base, timeout)
+    if available is not None and database not in available:
+        raise OdooDatabaseError(
+            f"Database '{database}' does not exist on {base} or is not served by this Odoo."
+        )
+
+    response = session.get(
+        f"{base}/web/login",
+        params={"db": database},
+        allow_redirects=False,
+        timeout=timeout,
+    )
+    session_id = response.cookies.get("session_id")
+    location = response.headers.get("Location", "")
+    if response.status_code not in (200, 302) or not session_id or "/web/database/selector" in location:
+        raise OdooDatabaseError(
+            f"Odoo at {base} did not open database '{database}' "
+            f"(HTTP {response.status_code}, redirect '{location}'). "
+            f"Check the database name and the server's dbfilter."
+        )
+
+    _odoo_db_sessions[key] = session_id
+    return session_id
+
+
+def _odoo_database_list(session: requests.Session, base: str, timeout: int) -> Optional[list]:
+    try:
+        response = session.post(
+            f"{base}/web/database/list",
+            json={"jsonrpc": "2.0", "method": "call", "params": {}},
+            timeout=timeout,
+        )
+        result = response.json().get("result")
+    except (requests.exceptions.RequestException, ValueError, AttributeError):
+        return None
+    return result if isinstance(result, list) else None
+
+
+def _odoo_route_missing(response: requests.Response) -> bool:
+    if response.status_code == 404:
+        return True
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return isinstance(error, dict) and error.get("code") in (404, 100)
+
+
+def post_to_odoo(session: requests.Session, merchant, payload_bytes: bytes,
+                 headers: Dict[str, str], timeout: int) -> requests.Response:
+    target_url = merchant.odoo_url.rstrip("/")
+    database = (merchant.odoo_database or "").strip()
+    headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
+
+    if not database:
+        return session.post(target_url, data=payload_bytes, headers=headers, timeout=timeout)
+
+    headers["Cookie"] = f"session_id={get_odoo_db_session(session, target_url, database, timeout)}"
+    response = session.post(target_url, data=payload_bytes, headers=headers, timeout=timeout)
+    if not _odoo_route_missing(response):
+        return response
+
+    headers["Cookie"] = f"session_id={get_odoo_db_session(session, target_url, database, timeout, refresh=True)}"
+    response = session.post(target_url, data=payload_bytes, headers=headers, timeout=timeout)
+    if _odoo_route_missing(response):
+        raise OdooDatabaseError(
+            f"Database '{database}' on {odoo_base_url(target_url)} has no Salla webhook route. "
+            f"Check that salla_webhook_integration is installed in it."
+        )
+    return response
 
 
 # ====================== HELPER FUNCTIONS ======================
@@ -152,6 +250,54 @@ def parse_payload(raw_payload: str) -> Tuple[Dict[str, Any], str, str]:
     merchant_id = str(payload.get("merchant") or payload.get("store_id", ""))
     
     return payload, event, merchant_id
+
+
+def classify_odoo_response(response: requests.Response) -> Tuple[str, Optional[str]]:
+    try:
+        body = response.json()
+    except ValueError:
+        return "failed", f"Non-JSON response from Odoo: {response.text[:200]}"
+
+    if not isinstance(body, dict):
+        return "failed", f"Unexpected response from Odoo: {str(body)[:200]}"
+
+    rpc_error = body.get("error")
+    if rpc_error:
+        if isinstance(rpc_error, dict):
+            data = rpc_error.get("data") or {}
+            detail = data.get("message") or rpc_error.get("message") or str(rpc_error)
+        else:
+            detail = str(rpc_error)
+        return "failed", f"Odoo error: {detail}"
+
+    result = body.get("result", body)
+    if not isinstance(result, dict):
+        return "forwarded", None
+
+    if result.get("status") == "failed":
+        return "failed", f"Odoo rejected webhook: {result.get('error') or result.get('message')}"
+
+    inner = result.get("result")
+    if isinstance(inner, dict) and (
+        inner.get("status") == "failed" or (inner.get("error") and not inner.get("status"))
+    ):
+        return "failed", f"Odoo handler failed: {inner.get('error') or inner.get('message')}"
+
+    message = str((inner or {}).get("message", "")) if isinstance(inner, dict) else ""
+    if message.startswith(("No handler", "Handler not implemented")):
+        return "ignored", f"Odoo has no handler: {message}"
+
+    return "forwarded", None
+
+
+def record_odoo_rejection(log_entry, merchant, response, outcome: str, detail: str) -> None:
+    log_entry.odoo_status_code = response.status_code
+    log_entry.odoo_response = response.text[:1000]
+    if outcome == "ignored":
+        log_entry.mark_ignored(detail)
+    else:
+        log_entry.mark_failed(detail)
+        merchant.record_failure()
 
 
 def calculate_backoff(retry_count: int, base_delay: int = 60) -> int:
@@ -246,6 +392,7 @@ def forward_webhook(
             payload=raw_payload,  # Store for retry capability
             headers=json.dumps(headers_dict),  # Store headers as JSON
         )
+        log_entry.apply_payload_refs(payload)
         db.session.add(log_entry)
     
     try:
@@ -294,16 +441,18 @@ def forward_webhook(
         # Encode payload back to bytes for HTTP request
         payload_bytes = raw_payload.encode('utf-8')
         
-        response = session.post(
-            target_url,
-            data=payload_bytes,
-            headers=forward_headers,
-            timeout=timeout,
-        )
+        response = post_to_odoo(session, merchant, payload_bytes, forward_headers, timeout)
         
         # Raise for 4xx/5xx status codes
         response.raise_for_status()
-        
+
+        outcome, detail = classify_odoo_response(response)
+        if outcome != "forwarded":
+            record_odoo_rejection(log_entry, merchant, response, outcome, detail)
+            db.session.commit()
+            logger.error(f"[{request_id}] Odoo did not process {event}: {detail}")
+            return {"status": outcome, "request_id": request_id, "reason": detail}
+
         # Success!
         merchant.record_success()
         log_entry.mark_forwarded(response.status_code, response.text[:500])
@@ -320,6 +469,13 @@ def forward_webhook(
             "odoo_status": response.status_code,
         }
         
+    except OdooDatabaseError as exc:
+        logger.error(f"[{request_id}] {exc}")
+        log_entry.mark_failed(str(exc))
+        merchant.record_failure()
+        db.session.commit()
+        return {"status": "failed", "request_id": request_id, "reason": str(exc)}
+
     except requests.exceptions.Timeout as exc:
         return handle_retry(
             self, request_id, merchant_id, event, exc,
@@ -474,9 +630,9 @@ def handle_dead_letter(
 @celery_app.task(bind=True)
 def retry_webhook_by_id(self, log_id: int) -> Dict[str, Any]:
     """
-    Retry a failed webhook by its log ID.
+    Retry a webhook by its log ID, whatever its current status.
     
-    Called from the admin panel to manually retry failed webhooks.
+    Called from the admin panel to manually re-send webhooks.
     """
     from models import db, Merchant, WebhookLog
     
@@ -486,9 +642,6 @@ def retry_webhook_by_id(self, log_id: int) -> Dict[str, Any]:
         logger.warning(f"Retry requested for non-existent log ID: {log_id}")
         return {"status": "error", "reason": "log_not_found"}
     
-    if log_entry.status != "failed":
-        logger.info(f"Skipping retry for log {log_id} - status is {log_entry.status}")
-        return {"status": "skipped", "reason": f"status_is_{log_entry.status}"}
     
     # Check if payload is stored
     if not log_entry.payload:
@@ -545,19 +698,21 @@ def retry_webhook_by_id(self, log_id: int) -> Dict[str, Any]:
         session = get_http_session()
         payload_bytes = log_entry.payload.encode('utf-8')
         
-        response = session.post(
-            target_url,
-            data=payload_bytes,
-            headers=headers_dict,
-            timeout=timeout,
-        )
+        response = post_to_odoo(session, merchant, payload_bytes, headers_dict, timeout)
         
         response.raise_for_status()
-        
+
+        log_entry.retry_count = (log_entry.retry_count or 0) + 1
+        outcome, detail = classify_odoo_response(response)
+        if outcome != "forwarded":
+            record_odoo_rejection(log_entry, merchant, response, outcome, detail)
+            db.session.commit()
+            logger.error(f"[RETRY FAILED] {log_entry.request_id} - {detail}")
+            return {"status": outcome, "request_id": log_entry.request_id, "error": detail}
+
         # Success!
         merchant.record_success()
         log_entry.mark_forwarded(response.status_code, response.text[:500])
-        log_entry.retry_count = (log_entry.retry_count or 0) + 1
         db.session.commit()
         
         logger.info(
@@ -571,7 +726,7 @@ def retry_webhook_by_id(self, log_id: int) -> Dict[str, Any]:
             "odoo_status": response.status_code,
         }
         
-    except requests.exceptions.RequestException as exc:
+    except (requests.exceptions.RequestException, OdooDatabaseError) as exc:
         error_msg = str(exc)
         logger.error(
             f"[RETRY FAILED] {log_entry.request_id} - {error_msg}"
