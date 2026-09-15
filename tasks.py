@@ -207,7 +207,7 @@ celery_app.Task = FlaskTask
 
 @celery_app.task(
     bind=True,
-    max_retries=None,
+    max_retries=None,  # We control retries manually for custom backoff
     acks_late=True,
     reject_on_worker_lost=True,
 )
@@ -215,7 +215,7 @@ def forward_webhook(
     self,
     request_id: str,
     merchant_id: str,
-    raw_payload: str,
+    raw_payload: str,  # String payload (will encode to bytes for forwarding)
     headers_dict: Dict[str, str],
 ) -> Dict[str, Any]:
     """

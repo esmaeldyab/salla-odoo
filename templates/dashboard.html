@@ -165,4 +165,35 @@
         </div>
     </div>
 </div>
+
+<!-- System Health -->
+<div class="row">
+    <div class="col-lg-12">
+        <div class="card shadow mb-4">
+            <div class="card-header py-3">
+                <h6 class="m-0 font-weight-bold" style="color: var(--primary-green);">System Information</h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <h6>Database</h6>
+                        <p class="mb-0"><i class="fas fa-check-circle text-success"></i> Connected</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h6>Webhook Endpoint</h6>
+                        <p class="mb-0"><code>/salla/webhook</code></p>
+                    </div>
+                    <div class="col-md-3">
+                        <h6>Total Webhooks Processed</h6>
+                        <p class="mb-0">{{ total_webhooks }}</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h6>Logs Location</h6>
+                        <p class="mb-0"><code>logs/webhook.log</code></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}

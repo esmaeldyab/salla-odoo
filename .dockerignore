@@ -1,0 +1,10 @@
+.env
+.env.*
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pid
+logs/
+celerybeat-schedule
+.git/
