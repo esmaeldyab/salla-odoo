@@ -36,19 +36,13 @@ Welcome to the Salla Integration Platform by FSolutions
 
 Your merchant account has been successfully created.
 
-Account Details:
-- Merchant ID: {merchant_id}
-- Merchant Name: {merchant_name}
+Our team will contact you as soon as possible to complete the integration with your system and ensure everything is properly configured.
 
-To complete the integration with your system and activate event synchronization,
-please contact our team so we can finalize the setup and ensure everything is configured correctly for your store.
-
-If you have any questions or need assistance, please don't hesitate to contact us at: +966530547274
+If you have any questions or need assistance, feel free to reach out to us.
 
 Best regards,
-FSolutions Team
 +966530547274
-Facilitating Solutions for Your Business
+Facilitating Solutions
 
 ---
 This is an automated message from the Salla Integration Platform.
@@ -139,21 +133,13 @@ This is an automated message from the Salla Integration Platform.
         
         <p>Your merchant account has been successfully created.</p>
         
-        <div class="info-box">
-            <strong>Account Details:</strong><br>
-            <strong>Merchant ID:</strong> {merchant_id}<br>
-            <strong>Merchant Name:</strong> {merchant_name}
-        </div>
+        <p>Our team will contact you as soon as possible to complete the integration with your system and ensure everything is properly configured.</p>
         
-        <p>To complete the integration with your system and activate event synchronization,
-        please contact our team so we can finalize the setup and ensure everything is configured correctly for your store.</p>
-        
-        <p>If you have any questions or need assistance, please don't hesitate to contact us at: +966530547274</p>
+        <p>If you have any questions or need assistance, feel free to reach out to us.</p>
         
         <p>Best regards,<br>
-        <strong>FSolutions Team</strong><br>
         <strong>+966530547274</strong><br>
-        <em>Facilitating Solutions for Your Business</em></p>
+        <em>Facilitating Solutions</em></p>
     </div>
     
     <div class="footer">
